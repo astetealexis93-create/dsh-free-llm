@@ -18,6 +18,14 @@
 - The bridge says it in plain words: the AI asks the IDE for its tools instead
   of using the ones its own CLI brings. Clixad keeps its own reader, which is
   the way the prompt reaches it.
+- The page of the plugin does not fall over any more. A turn whose model came
+  as the whole metadata object took the page down with it; the ledger keeps
+  the id of the model now.
+- The plugin page answers in a couple of seconds: the routes ask their CLI
+  whether it has a session at the same time, and the answer is kept for a
+  minute.
+- A new probe opens the page of the plugin in the running IDE and checks it on
+  the screen (`node test/page.mjs`).
 - A new probe tells which shape of call each CLI answers
   (`node test/transport.mjs`), and another drives the running IDE to prove the
   route answers there (`node test/field.mjs`).

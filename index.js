@@ -795,6 +795,13 @@ function markOldAuxiliary(entry) {
   return entry
 }
 
+/** The ledger keeps the id of the model, never the metadata object. */
+function normalizeEntry(entry) {
+  const normalized = markOldAuxiliary(entry)
+  if (!normalized || typeof normalized.model !== 'object' || normalized.model === null) return normalized
+  return { ...normalized, model: normalized.model.id ?? String(normalized.model) }
+}
+
 /** A tiny JSON ledger of the turns that went through the CLIs. */
 class UsageLedger {
   constructor(file, limit = 500) {
@@ -803,14 +810,15 @@ class UsageLedger {
     this.entries = []
     try {
       const raw = JSON.parse(readFileSync(file, 'utf8'))
-      if (Array.isArray(raw)) this.entries = raw.slice(-limit).map(markOldAuxiliary)
+      if (Array.isArray(raw)) this.entries = raw.slice(-limit).map(normalizeEntry)
     } catch {
       /* no ledger yet */
     }
   }
 
   record(entry) {
-    this.entries.push(entry)
+    const normalized = normalizeEntry(entry)
+    this.entries.push(normalized)
     if (this.entries.length > this.limit) this.entries.splice(0, this.entries.length - this.limit)
     try {
       mkdirSync(dirname(this.file), { recursive: true })

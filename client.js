@@ -72,6 +72,13 @@ window.__ModuleLoader__.load({
       return h('span', { style: { ...S.pill, ...(tone === 'good' ? S.good : tone === 'bad' ? S.bad : {}) } }, children)
     }
 
+    /** The model of a turn is its id, never the metadata object. */
+    function modelName(model) {
+      if (typeof model === 'string') return model
+      if (model && typeof model === 'object') return model.id ?? ''
+      return ''
+    }
+
     function RouteCard({ route }) {
       const models = route.models ?? []
       const accent = route.accent ?? '#6366f1'
@@ -161,7 +168,7 @@ window.__ModuleLoader__.load({
                   'tr',
                   { key: `${entry.at}-${index}` },
                   h('td', { style: { ...S.td, color: accents[entry.provider] } }, entry.provider),
-                  h('td', { style: { ...S.td, ...S.model } }, entry.model),
+                  h('td', { style: { ...S.td, ...S.model } }, modelName(entry.model)),
                   h('td', { style: S.td }, entry.ms ?? ''),
                   h('td', { style: S.td }, entry.inputTokens ?? 0),
                   h('td', { style: S.td }, entry.outputTokens ?? 0),

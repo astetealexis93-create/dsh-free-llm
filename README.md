@@ -216,11 +216,13 @@ node test/run.mjs qoder bridge  # una sola, y además el puente de tools
 node test/transport.mjs         # cómo recibe el prompt cada CLI
 node test/ui.mjs --provider kilo --pick 0   # un turno real en la IDE abierta
 node test/field.mjs             # un turno real por ruta, en la IDE abierta
+node test/page.mjs              # la página del plugin, en la IDE abierta
 ```
 
 `test/ui.mjs` y `test/field.mjs` hablan con la IDE por su puerto de depuración
 (`--remote-debugging-port=9222` al arrancarla) y juzgan el turno con el registro
-de uso que escribe el plugin, no con la pantalla.
+de uso que escribe el plugin, no con la pantalla. `test/page.mjs` abre la página
+del plugin y mira que las rutas y el uso estén en pantalla.
 
 ## Licencia
 
