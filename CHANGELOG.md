@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0 — 2026-11-11
+
+- The routes answer the IDE's model catalog the way it reads it: every model
+  carries its provider, its id and its name, and the exact-model query answers
+  with the model's metadata instead of the bare id. Before this, the IDE took
+  the whole provider out of the selector.
+- Each model carries a badge with its provider and that provider's tone, so the
+  selector shows one group per CLI with its own colour. The IDE paints the badge
+  from a fixed palette, so the tone is the closest one to each provider's
+  colour: Kilo and OpenCode land exactly on amber and green.
+- The catalog answers at once: the fixed catalog serves the selector and the
+  CLI refreshes it in the background, when no turn is using that CLI.
+- One CLI at a time per route: a turn, a model listing and a sign-in probe of
+  the same route no longer run together.
+- The contract test checks the catalog shape, the exact-model metadata and how
+  fast the catalog answers.
+
 ## 0.3.0 — 2026-11-11
 
 - Qoder CLI joins the routes with the session the IDE already holds. Its version

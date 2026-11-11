@@ -21,10 +21,13 @@ las de la IDE y no las suyas.
   detecta y no vuelve a pedir login. Solo arranca un inicio de sesión cuando de verdad falta.
 - **Publica los modelos gratuitos** de cada CLI en el selector, con los nombres reales de cada modelo. Si
   una CLI ofrece varios, el nombre va con su proveedor (`deepseek-v4.1-flash-free (OpenCode)`); si ofrece uno
-  solo, va el modelo pelado. Cada proveedor tiene su color en la página del plugin.
+  solo, va el modelo pelado. Cada proveedor aparece en su propio grupo del selector y lleva su color: en la
+  página del plugin con el color exacto, y en el selector del chat con la insignia del proveedor.
 - **Cruza las tools de la IDE** a cada turno con un puente JSON validado, y devuelve las llamadas como
   tool calls del harness.
 - **Anota el uso** de cada turno (proveedor, modelo, tokens, duración) y lo muestra en su propia página.
+- **No se pisa con la CLI.** Cada CLI tiene su propia sesión en la máquina, así que un turno, un listado de
+  modelos y una comprobación de sesión de la misma ruta nunca corren a la vez.
 
 ---
 
@@ -147,6 +150,29 @@ El motor habla con la CLI en su propio idioma:
 
 En Windows, ningún `.cmd` se lanza con shell: el motor lee el shim, encuentra el script real y lo arranca con
 node. Por eso funciona incluso con el espacio en `ideep code` del PATH de la IDE.
+
+### El catálogo que pide el selector
+
+El IDE le pregunta a cada ruta sus modelos antes de pintar el selector, así que la respuesta tiene que ser
+inmediata. El plugin contesta con el catálogo fijo al instante y, cuando no hay turno en curso, refresca esa
+lista con la CLI en vivo para la siguiente llamada. Cada modelo lleva el nombre que se ve, la descripción del
+proveedor y la insignia que lleva su color.
+
+El IDE también le pregunta los datos exactos de cada modelo (contexto, nombre). Ahí el plugin contesta con
+el modelo completo: si devolviera solo el identificador, el IDE sacaría el proveedor entero del selector.
+
+La insignia del selector no lleva un color libre: el IDE la pinta con una paleta cerrada y el plugin elige el
+tono que más se acerca al color de cada proveedor. Kilo y OpenCode caen exactos (ámbar y verde); el resto se
+acerca al tono más próximo de la paleta.
+
+| Proveedor | Color de la insignia | Tono |
+|---|---|---|
+| Kilo Code | ámbar `#f59e0b` | `warning` |
+| OpenCode | verde `#22c55e` | `success` |
+| Clixad | gris | `neutral` |
+| GitHub Copilot | azul `#4176e6` | `info` |
+| Grok (xAI) | rojo `#ec1313` | `danger` |
+| Qoder CLI | verde `#22c55e` | `success` |
 
 ### El puente de herramientas
 

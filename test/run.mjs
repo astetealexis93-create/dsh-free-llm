@@ -57,6 +57,57 @@ for (const { name: route, adapter } of routes) {
   console.log(`${route}: ${models.length} free models -> ${models.slice(0, 4).map((model) => model.id).join(', ')}`)
   console.log(`${route}: selector names -> ${models.slice(0, 4).map((model) => model.name).join(' | ')}`)
 
+  // The contract the host checks before it paints the selector: every model
+  // carries provider, id and name, ids never repeat, and the badge that holds
+  // the provider colour uses a tone the UI knows. The host forwards the tone
+  // untouched, so the set that matters is the one the Tag component paints.
+  const TONES = new Set([
+    'neutral',
+    'info',
+    'success',
+    'warning',
+    'danger',
+    'outline',
+    'solid',
+    'quiet',
+  ])
+  const seen = new Set()
+  let catalogOk = models.length > 0
+  for (const model of models) {
+    if (model.provider !== route) catalogOk = false
+    if (typeof model.id !== 'string' || model.id.length === 0) catalogOk = false
+    if (typeof model.name !== 'string' || model.name.length === 0) catalogOk = false
+    if (seen.has(model.id)) catalogOk = false
+    seen.add(model.id)
+    if (!model.badge || !TONES.has(model.badge.tone)) catalogOk = false
+  }
+  results.push({ route, catalog: catalogOk ? 'ok' : 'bad', ok: catalogOk })
+  console.log(`${route}: catalog contract -> ${catalogOk ? 'ok' : 'BAD'}`)
+
+  // The exact-model metadata: the host rejects a bare id here and drops the
+  // whole provider out of the selector.
+  const info = await adapter.resolveModel(route, models[0]?.id)
+  const infoOk =
+    Boolean(info) &&
+    info.provider === route &&
+    info.id === models[0]?.id &&
+    typeof info.name === 'string' &&
+    info.name.length > 0 &&
+    Number.isInteger(info.context?.contextWindow) &&
+    info.context.contextWindow > 0
+  results.push({ route, resolve: infoOk ? 'ok' : 'bad', ok: infoOk })
+  console.log(`${route}: resolveModel -> ${JSON.stringify(info)}`)
+
+  // The selector waits for this answer, so it has to come back at once even
+  // when the CLI behind it is slow.
+  adapter.listCache?.clear?.()
+  const startedAt = Date.now()
+  await adapter.listModels(route)
+  const listMs = Date.now() - startedAt
+  const fastOk = listMs < 3000
+  results.push({ route, listMs, ok: fastOk })
+  console.log(`${route}: cold catalog -> ${listMs} ms ${fastOk ? 'ok' : 'TOO SLOW'}`)
+
   const call = await adapter.prepareCall(route, models[0]?.id, undefined)
   const events = []
   for await (const event of call.stream({
@@ -112,3 +163,5 @@ if (failed.length > 0) {
   console.error('failed:', failed.map((entry) => entry.route).join(', '))
   process.exit(1)
 }
+// The background refresh of the live catalog may still hold a CLI process.
+process.exit(0)

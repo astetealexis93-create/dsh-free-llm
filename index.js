@@ -42,6 +42,37 @@ export const inject = ['llm']
 /** Windows corta una linea de comandos cerca de 32 KiB; un prompt largo va a un archivo. */
 const ARG_PROMPT_LIMIT = 20000
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
+ * One CLI at a time per route.
+ *
+ * Every CLI here keeps a single session on the machine, so a turn, a model
+ * listing and a sign-in probe of the same route must not run together: the
+ * second process would take the session and the first would answer nothing.
+ */
+class CliLock {
+  constructor() {
+    this.chains = new Map()
+  }
+
+  /** Wait until the route is free, then take it. */
+  async acquire(key) {
+    const previous = this.chains.get(key) ?? Promise.resolve()
+    let free
+    const mine = new Promise((resolve) => {
+      free = resolve
+    })
+    const chain = previous.then(() => mine)
+    this.chains.set(key, chain)
+    await previous
+    return () => {
+      free()
+      if (this.chains.get(key) === chain) this.chains.delete(key)
+    }
+  }
+}
+
+const CLI_LOCK = new CliLock()
 /** El listado de modelos en vivo se cachea: cada CLI tarda en responder. */
 const LIST_TTL_MS = 5 * 60 * 1000
 const DEFAULT_CONTEXT_WINDOW = 200000
@@ -583,6 +614,8 @@ function buildRoute(entry, override = {}) {
     promptMode: entry.promptMode ?? '',
     providerLabel: entry.providerLabel ?? entry.displayName ?? entry.id,
     accent: entry.accent ?? '#6366f1',
+    tone: entry.tone ?? 'neutral',
+    blurb: entry.blurb ?? '',
     ...override,
   }
   route.listArgs =
@@ -863,10 +896,17 @@ class SignInManager {
     if (this.hasStoredCredential(provider)) return { signedIn: true, text: 'credential found on this machine' }
     const route = this.config.providers?.[provider]
     if (!route || !executablePath(route.bin)) return { signedIn: false, text: 'CLI not installed' }
-    const { code, stdout, stderr } = await runCapture(route, login.statusArgs ?? [], {
-      cwd: this.config.cwd,
-      timeoutMs: 30000,
-    }).catch(() => ({ code: null, stdout: '', stderr: '' }))
+    const release = await CLI_LOCK.acquire(provider)
+    let result
+    try {
+      result = await runCapture(route, login.statusArgs ?? [], {
+        cwd: this.config.cwd,
+        timeoutMs: 30000,
+      }).catch(() => ({ code: null, stdout: '', stderr: '' }))
+    } finally {
+      release()
+    }
+    const { code, stdout, stderr } = result
     const text = `${stdout}\n${stderr}`
     return { signedIn: code === 0 && login.signedIn(text), text: text.trim() }
   }
@@ -922,10 +962,14 @@ class CliAdapter {
     this.setup = setup
     this.ledger = ledger
     this.listCache = new Map()
+    this.refreshing = new Set()
+    this.refreshTimers = new Map()
+    this.turns = 0
   }
 
   providerInfo(provider) {
-    return { id: provider, name: this.config.providers[provider]?.displayName ?? provider }
+    const route = this.config.providers[provider]
+    return { id: provider, name: route?.providerLabel ?? route?.displayName ?? provider }
   }
 
   /** The CLI route keeps the host default retry policy. */
@@ -938,11 +982,70 @@ class CliAdapter {
     return undefined
   }
 
+  /**
+   * The models of one route, as the selector wants them.
+   *
+   * The harness asks every provider for its catalog before it paints the
+   * selector, so the answer has to be immediate: the fixed catalog answers at
+   * once and the CLI refreshes it in the background for the next call.
+   */
   async listModels(provider) {
     const route = this.config.providers[provider]
     if (!route) return []
     const cached = this.listCache.get(provider)
     if (cached && Date.now() - cached.at < LIST_TTL_MS) return cached.models
+    const fixed = route.models ?? []
+    if (fixed.length > 0) {
+      if (!cached) {
+        const models = fixed.map((id) => this.modelEntry(provider, id, fixed.length > 1))
+        this.listCache.set(provider, { at: Date.now(), models })
+      }
+      this.scheduleRefresh(provider)
+      return this.listCache.get(provider).models
+    }
+    const release = await CLI_LOCK.acquire(provider)
+    let models
+    try {
+      models = await this.liveModels(provider)
+    } finally {
+      release()
+    }
+    this.listCache.set(provider, { at: Date.now(), models })
+    return models
+  }
+
+  /** Ask the CLI later, once no turn is using it. */
+  scheduleRefresh(provider) {
+    const pending = this.refreshTimers.get(provider)
+    if (pending) clearTimeout(pending)
+    const timer = setTimeout(() => {
+      this.refreshTimers.delete(provider)
+      this.refreshModels(provider)
+    }, 5000)
+    timer.unref?.()
+    this.refreshTimers.set(provider, timer)
+  }
+
+  /** Ask the CLI what it offers and keep the answer for the next call. */
+  async refreshModels(provider) {
+    if (this.refreshing.has(provider)) return
+    if (this.turns > 0) return
+    this.refreshing.add(provider)
+    const release = await CLI_LOCK.acquire(provider)
+    try {
+      const models = await this.liveModels(provider)
+      if (models.length > 0) this.listCache.set(provider, { at: Date.now(), models })
+    } catch {
+      /* the fixed catalog stays in place */
+    } finally {
+      release()
+      this.refreshing.delete(provider)
+    }
+  }
+
+  /** The models the CLI itself lists right now. */
+  async liveModels(provider) {
+    const route = this.config.providers[provider]
     let models = []
     try {
       if (Array.isArray(route.listArgs)) {
@@ -954,18 +1057,28 @@ class CliAdapter {
           const ids = route.parseList(stdout).filter((id) => typeof id === 'string' && id.length > 0)
           const free = route.filterFree ? ids.filter((id) => looksFree(id, route)) : ids
           const chosen = free.length > 0 ? free : ids
-          models = chosen.map((id) => ({ provider, id, name: modelLabel(id, provider, route, chosen.length > 1) }))
+          models = chosen.map((id) => this.modelEntry(provider, id, chosen.length > 1))
         }
       }
     } catch {
       /* the CLI could not answer; the fixed catalog answers instead */
     }
-    if (models.length === 0) {
-      const fixed = route.models ?? []
-      models = fixed.map((id) => ({ provider, id, name: modelLabel(id, provider, route, fixed.length > 1) }))
-    }
-    this.listCache.set(provider, { at: Date.now(), models })
     return models
+  }
+
+  /**
+   * One model as the selector shows it: its name, the badge that carries the
+   * provider and the tone that paints that badge in the provider's colour.
+   */
+  modelEntry(provider, id, many) {
+    const route = this.config.providers[provider]
+    return {
+      provider,
+      id,
+      name: modelLabel(id, provider, route, many),
+      ...route?.blurb ? { description: route.blurb } : {},
+      badge: { text: route?.providerLabel ?? provider, tone: route?.tone ?? 'neutral' },
+    }
   }
 
   limitsFor(provider, model) {
@@ -973,14 +1086,34 @@ class CliAdapter {
     return { contextWindow: route?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, maxOutputTokens: route?.maxOutputTokens }
   }
 
-  async resolveModel(provider, model) {
+  /** The model id a call runs on. */
+  modelId(provider, model) {
     if (typeof model === 'string' && model.length > 0) return model
-    return this.config.providers[provider]?.defaultModel
+    return this.config.providers[provider]?.defaultModel ?? ''
+  }
+
+  /**
+   * The exact metadata the harness reads for one model of this route.
+   *
+   * The host validates this shape, and a route that answers with the bare id
+   * takes its whole provider out of the selector.
+   */
+  async resolveModel(provider, model) {
+    const id = this.modelId(provider, model)
+    const route = this.config.providers[provider]
+    const limits = this.limitsFor(provider, id)
+    const many = (route?.models?.length ?? 1) > 1
+    return {
+      provider,
+      id,
+      name: modelLabel(id, provider, route, many),
+      context: { contextWindow: limits.contextWindow ?? DEFAULT_CONTEXT_WINDOW },
+    }
   }
 
   async prepareCall(provider, model, signal) {
     return {
-      model: await this.resolveModel(provider, model),
+      model: this.modelId(provider, model),
       stream: (options) => this.stream({ ...options, provider, signal }),
     }
   }
@@ -1008,6 +1141,20 @@ class CliAdapter {
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
       return
     }
+    // One CLI at a time: every CLI here keeps one session on the machine, and
+    // two processes at once leave one of them without an answer.
+    const release = await CLI_LOCK.acquire(provider)
+    this.turns += 1
+    try {
+      yield* this.streamLocked(options, route, provider)
+    } finally {
+      this.turns -= 1
+      release()
+    }
+  }
+
+  async *streamLocked(options, route, provider) {
+    const startedAt = Date.now()
     try {
       await this.setup?.ensure(provider)
     } catch (error) {
