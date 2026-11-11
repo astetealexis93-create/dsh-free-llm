@@ -1,0 +1,64 @@
+{
+  "name": "dsh-free-llm",
+  "version": "0.3.0",
+  "description": "Model routes for DeepSeek Harness served by the agent CLIs installed on the host (Kilo Code, OpenCode, Clixad, GitHub Copilot, Grok, Qoder CLI), with the IDE tools bridged into every turn, adopted logins and a dashboard of recorded usage",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "llm",
+    "cli",
+    "free",
+    "kilocode",
+    "opencode",
+    "clixad",
+    "copilot",
+    "grok",
+    "qoder"
+  ],
+  "license": "MIT",
+  "author": "astetealexis93-create",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/astetealexis93-create/dsh-free-llm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/astetealexis93-create/dsh-free-llm/issues"
+  },
+  "homepage": "https://github.com/astetealexis93-create/dsh-free-llm#readme",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./catalog": "./catalog.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "catalog.js",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/run.mjs"
+  },
+  "engines": {
+    "node": ">=20.11"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-llm": "*"
+  }
+}

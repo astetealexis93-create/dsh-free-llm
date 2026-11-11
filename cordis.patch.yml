@@ -1,0 +1,14 @@
+# Mounts the free-llm host plugin: model routes served by the free agent CLIs
+# installed on this host (Kilo Code, OpenCode, Clixad and Qoder), the IDE tools
+# bridged into each turn, and a dashboard of the usage they recorded.
+#
+# The browser half is discovered through this package's `dsh.client` manifest
+# and `./client` export: it adds the plugin's own page to the Web client's
+# Plugins panel and to Settings.
+#
+# Deployment specifics (workspace path, ledger file, which routes are enabled)
+# belong to the profile's own cordis.patch.yml, which overrides this entry by
+# `id` with a complete config block.
+- insert:
+    - id: free-llm
+      name: dsh-free-llm

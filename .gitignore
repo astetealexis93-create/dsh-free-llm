@@ -1,0 +1,8 @@
+node_modules/
+_probe/
+*.log
+*.txt
+!README.md
+!CHANGELOG.md
+kilo-models.json
+models-dev.json
