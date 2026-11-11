@@ -1,6 +1,6 @@
 {
   "name": "dsh-free-llm",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Model routes for DeepSeek Harness served by the agent CLIs installed on the host (Kilo Code, OpenCode, Clixad, GitHub Copilot, Grok, Qoder CLI), with the IDE tools bridged into every turn, adopted logins and a dashboard of recorded usage",
   "keywords": [
     "dsh-plugin",

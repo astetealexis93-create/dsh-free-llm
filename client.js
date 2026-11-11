@@ -116,11 +116,13 @@ window.__ModuleLoader__.load({
     }
 
     function UsageTable({ usage, accents }) {
-      const entries = usage?.entries ?? []
+      const all = usage?.entries ?? []
+      const entries = all.filter((entry) => !entry.auxiliary)
       if (entries.length === 0) {
         return h('p', { style: S.muted }, 'Todavía no se registró ningún turno.')
       }
       const totals = usage?.totals ?? {}
+      const auxiliary = totals.auxiliary ?? 0
       return h(
         'div',
         null,
@@ -128,7 +130,8 @@ window.__ModuleLoader__.load({
           'p',
           { style: { ...S.muted, margin: '0 0 8px' } },
           `${totals.turns ?? 0} turnos · ${totals.ok ?? 0} bien · ${totals.failed ?? 0} con error · ` +
-            `${totals.inputTokens ?? 0} tokens de entrada · ${totals.outputTokens ?? 0} de salida`,
+            `${totals.inputTokens ?? 0} tokens de entrada · ${totals.outputTokens ?? 0} de salida` +
+            (auxiliary > 0 ? ` · ${auxiliary} auxiliares (título de sesión) fuera de la cuenta` : ''),
         ),
         h(
           'table',

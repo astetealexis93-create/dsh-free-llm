@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.1 — 2026-11-11
+
+- The exact-model metadata that comes back from a call is the model's own
+  record, never the bare id. The IDE rejects a bare id and drops the whole
+  provider out of the selector with `INVALID_MODEL_INFO`.
+- The prompt travels the way each CLI can take it: its standard input, or a
+  file inside the workspace the CLI works on. The prompt of the IDE does not
+  fit in a Windows command line (32 KiB), and pasting it back as an argument
+  broke the turn with `ENAMETOOLONG`.
+- The contract test checks the metadata the way the IDE checks it and walks
+  every model of every route, not only the first one.
+- The turn the IDE spends naming the session is marked as auxiliary: it no
+  longer counts as a failed turn in the ledger nor in the plugin's page. The
+  IDE gives that turn 60 seconds, and a slow CLI can use them all while the
+  answer to the conversation arrives fine.
+- The bridge says it in plain words: the AI asks the IDE for its tools instead
+  of using the ones its own CLI brings. Clixad keeps its own reader, which is
+  the way the prompt reaches it.
+- A new probe tells which shape of call each CLI answers
+  (`node test/transport.mjs`), and another drives the running IDE to prove the
+  route answers there (`node test/field.mjs`).
+
 ## 0.4.0 — 2026-11-11
 
 - The routes answer the IDE's model catalog the way it reads it: every model

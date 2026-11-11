@@ -26,6 +26,7 @@ las de la IDE y no las suyas.
 - **Cruza las tools de la IDE** a cada turno con un puente JSON validado, y devuelve las llamadas como
   tool calls del harness.
 - **Anota el uso** de cada turno (proveedor, modelo, tokens, duración) y lo muestra en su propia página.
+  El turno que el IDE gasta en nombrar la sesión va aparte: no cuenta como turno ni como fallo.
 - **No se pisa con la CLI.** Cada CLI tiene su propia sesión en la máquina, así que un turno, un listado de
   modelos y una comprobación de sesión de la misma ruta nunca corren a la vez.
 
@@ -151,6 +152,20 @@ El motor habla con la CLI en su propio idioma:
 En Windows, ningún `.cmd` se lanza con shell: el motor lee el shim, encuentra el script real y lo arranca con
 node. Por eso funciona incluso con el espacio en `ideep code` del PATH de la IDE.
 
+### Cómo viaja el prompt
+
+El contexto que manda la IDE no cabe en una línea de comandos: Windows la corta cerca de 32 KiB. Por eso cada
+ruta declara cómo recibe el prompt, y el motor lo manda por ese camino:
+
+| Ruta | Cómo recibe el prompt |
+|---|---|
+| `kilo`, `opencode`, `copilot`, `grok`, `qoder` | Por su entrada estándar (`stdin`) |
+| `clixad` | Por un archivo dentro del workspace, que su propia herramienta de lectura abre |
+
+El archivo del prompt se borra cuando el turno acaba, y los que deja un turno muerto se limpian al arrancar.
+Las CLIs que solo leen dentro de su workspace no encuentran el prompt si vive en la carpeta temporal del
+sistema: por eso se escribe junto al proyecto.
+
 ### El catálogo que pide el selector
 
 El IDE le pregunta a cada ruta sus modelos antes de pintar el selector, así que la respuesta tiene que ser
@@ -198,7 +213,14 @@ inicio de sesión, comprueba si ya hay una credencial en la máquina y, si la ha
 node test/run.mjs               # todas las rutas
 node test/run.mjs qoder         # una sola
 node test/run.mjs qoder bridge  # una sola, y además el puente de tools
+node test/transport.mjs         # cómo recibe el prompt cada CLI
+node test/ui.mjs --provider kilo --pick 0   # un turno real en la IDE abierta
+node test/field.mjs             # un turno real por ruta, en la IDE abierta
 ```
+
+`test/ui.mjs` y `test/field.mjs` hablan con la IDE por su puerto de depuración
+(`--remote-debugging-port=9222` al arrancarla) y juzgan el turno con el registro
+de uso que escribe el plugin, no con la pantalla.
 
 ## Licencia
 

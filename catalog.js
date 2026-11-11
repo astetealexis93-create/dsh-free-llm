@@ -202,7 +202,11 @@ export const CATALOG = [
     blurb: 'Modelo gratuito del gateway de Kilo: sin clave, sin registro y sin cuota.',
     family: 'text',
     invocation: 'run-model',
-    ...npmShim('kilo', '@kilocode/cli'),
+    // El prompt no cabe en una linea de comandos: la CLI lo lee de su entrada estandar.
+    promptTransport: 'stdin',
+    ...npmShim('kilo', '@kilocode/cli', HOME.profile
+      ? [`${HOME.profile}\\.dsh\\free-llm\\clis\\kilo\\node_modules\\.bin\\kilo.cmd`]
+      : []),
     listArgs: ['models'],
     listParser: 'ids',
     filterFree: true,
@@ -223,6 +227,8 @@ export const CATALOG = [
     blurb: 'Modelo de precio cero del catálogo de OpenCode.',
     family: 'opencode',
     invocation: 'run-model',
+    // OpenCode lee el prompt de su entrada estandar cuando no se le pasa como argumento.
+    promptTransport: 'stdin',
     ...npmShim('opencode', 'opencode-ai'),
     listArgs: ['models'],
     listParser: 'ids',
@@ -250,6 +256,10 @@ export const CATALOG = [
     blurb: 'Modelo que la CLI de Clixad marca como gratis hoy; la lista rota cada día.',
     family: 'text',
     invocation: 'print',
+    // Clixad exige el prompt como argumento, asi que se lo da un archivo que su
+    // propia tool de lectura abre: el contexto completo entra sin pasar por la
+    // linea de comandos.
+    promptTransport: 'file',
     ...npmShim('clixad', 'clixad'),
     listArgs: ['models'],
     listParser: 'marked-free',
@@ -276,7 +286,8 @@ export const CATALOG = [
     blurb: 'Modelo que tu plan de GitHub deja disponible desde la CLI.',
     family: 'copilot',
     invocation: 'print',
-    promptMode: 'inline',
+    // Copilot toma el prompt de la entrada estandar; con -p exige un valor.
+    promptTransport: 'stdin',
     bin: ['copilot'],
     npm: '@github/copilot',
     candidates: [
@@ -311,7 +322,8 @@ export const CATALOG = [
     blurb: 'Modelo de xAI: cobra por token.',
     family: 'grok',
     invocation: 'print',
-    promptMode: 'inline',
+    // Grok lee el prompt de la entrada estandar.
+    promptTransport: 'stdin',
     bin: ['grok'],
     npm: null,
     candidates: [
@@ -342,6 +354,9 @@ export const CATALOG = [
     blurb: 'Modelo de Qoder CLI, con la sesión de tu IDE.',
     family: 'text',
     invocation: 'print',
+    // La CLI de Qoder lee el prompt de la entrada estandar con -p.
+    promptTransport: 'stdin',
+    printFlag: '-p',
     modelFlag: true,
     // La CLI se instala en la carpeta que el plugin posee. La 1.1.85 que trae el
     // IDE pide un SDK más nuevo del que hay, así que la versión va fijada.

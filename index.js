@@ -22,7 +22,6 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -42,6 +41,10 @@ export const inject = ['llm']
 /** Windows corta una linea de comandos cerca de 32 KiB; un prompt largo va a un archivo. */
 const ARG_PROMPT_LIMIT = 20000
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000
+/** Nombre del archivo donde una CLI que solo lee su workspace recibe el prompt. */
+const PROMPT_FILE_PREFIX = '.dsh-free-llm-prompt-'
+/** Cuánto se guarda la respuesta de la CLI cuando se le pregunta si hay sesión. */
+const SIGN_IN_CACHE_MS = 60 * 1000
 
 /**
  * One CLI at a time per route.
@@ -265,6 +268,46 @@ function cleanEnv(env, strip) {
   return copy
 }
 
+/**
+ * Write the prompt where a CLI can read it: inside the workspace it works on.
+ *
+ * Some CLIs refuse to open a file outside their own workspace, so the prompt
+ * lands next to the project and is removed when the turn ends.
+ */
+function writePromptFile(cwd, prompt) {
+  const file = join(cwd, `${PROMPT_FILE_PREFIX}${process.pid}.txt`)
+  try {
+    writeFileSync(file, prompt, { mode: 0o600 })
+    return file
+  } catch {
+    const fallback = join(tmpdir(), `${PROMPT_FILE_PREFIX}${process.pid}.txt`)
+    writeFileSync(fallback, prompt, { mode: 0o600 })
+    return fallback
+  }
+}
+
+/** Remove the prompt files that a turn that died mid-flight left behind. */
+function clearPromptFiles(cwd) {
+  try {
+    for (const name of readdirSync(cwd)) {
+      if (name.startsWith(PROMPT_FILE_PREFIX) && name.endsWith('.txt')) {
+        rmSync(join(cwd, name), { force: true })
+      }
+    }
+  } catch {
+    /* the workspace may not be readable */
+  }
+}
+
+/**
+ * The harness asks the model for things beside the chat, like the title of a
+ * session. Those calls have their own deadline and are not turns of the user.
+ */
+function isAuxiliaryRequest(options) {
+  const messages = Array.isArray(options?.messages) ? options.messages : []
+  return messages.some((message) => String(message?.source?.kind ?? '').startsWith('dsh-session-title'))
+}
+
 /** A route carries the executable and the arguments that come before its own. */
 function spawnCommand(route, args, options) {
   const bin = typeof route === 'string' ? route : route?.bin
@@ -366,13 +409,17 @@ function buildPrompt(options, includeSystem) {
 }
 
 /** Describe the IDE tools the CLI may ask for. */
-function toolBridgePrompt(tools) {
+function toolBridgePrompt(tools, options = {}) {
+  const rule = options.ownReadAllowed
+    ? 'Use your own Read tool only to open the prompt file you were given; for every other task request the IDE tools below.'
+    : 'Do not use your own built-in tools for files, search or commands; request the IDE tools below so the IDE runs them.'
   return (
     `\n\nDSH tools available for this turn (JSON schemas):\n${JSON.stringify(tools)}\n` +
     `To request one or more of THESE tools, return ONLY ${TOOL_BRIDGE_PREFIX}` +
     '[{"name":"exact tool name","arguments":{}}] with valid JSON double quotes. ' +
     'The host executes the tools under its own permission rules and returns correlated tool results on the next turn. ' +
-    'Do not claim a tool was executed before its result arrives. For a normal answer, write normal text without this prefix.'
+    'Do not claim a tool was executed before its result arrives. For a normal answer, write normal text without this prefix. ' +
+    rule
   )
 }
 
@@ -611,7 +658,10 @@ function buildRoute(entry, override = {}) {
     extraArgs: entry.extraArgs ?? [],
     stripEnv: entry.stripEnv ?? [],
     modelFlag: entry.modelFlag ?? false,
-    promptMode: entry.promptMode ?? '',
+    // How the prompt reaches the CLI: its standard input, a file it reads
+    // itself, or the command line when the route insists on it.
+    promptTransport: entry.promptTransport ?? 'stdin',
+    printFlag: entry.printFlag ?? '',
     providerLabel: entry.providerLabel ?? entry.displayName ?? entry.id,
     accent: entry.accent ?? '#6366f1',
     tone: entry.tone ?? 'neutral',
@@ -631,45 +681,40 @@ function buildRoute(entry, override = {}) {
   const lineParsers = { text: parseTextLine, opencode: parseOpencodeLine, copilot: parseCopilotLine, grok: parseGrokLine }
   route.parseLine = override.parseLine ?? lineParsers[route.family] ?? parseOpencodeLine
 
-  const promptText = (prompt, promptFile) =>
-    promptFile ? readFileSync(promptFile, 'utf8') : prompt
+  /**
+   * The prompt travels in one of three ways: as an argument, as the standard
+   * input of the CLI, or as a file the CLI reads itself. Windows cuts a command
+   * line at 32 KiB and the IDE sends longer contexts, so only the first two
+   * routes survive a real conversation.
+   */
+  const promptArgument = (prompt, promptFile) => {
+    if (route.promptTransport === 'file') {
+      return promptFile
+        ? `Lee el archivo ${promptFile} con la herramienta Read y responde a su ultima intervencion.`
+        : prompt
+    }
+    if (route.promptTransport === 'inline') return prompt
+    return null
+  }
 
   if (route.invocation === 'run-model') {
     route.buildArgs =
       override.buildArgs ??
-      ((model, prompt, promptFile, execution = {}) => {
+      ((model, prompt, promptFile) => {
         const target = model || route.defaultModel
-        if (route.family === 'text') return ['run', '--model', target, promptText(prompt, promptFile)]
-        if (execution.images?.length) {
-          return [
-            'run',
-            '--model',
-            target,
-            '--format',
-            'json',
-            '--file',
-            execution.images[0],
-            promptFile ? `Read the full transcript at ${promptFile} and answer its last user turn.` : prompt,
-          ]
-        }
-        if (promptFile) {
-          return [
-            'run',
-            '--model',
-            target,
-            '--format',
-            'json',
-            '--file',
-            promptFile,
-            'The attached file is the full conversation transcript. Reply with your next message only, with no commentary about the file.',
-          ]
-        }
-        return ['run', '--model', target, '--format', 'json', prompt]
+        const args = ['run', '--model', target]
+        if (route.family === 'opencode') args.push('--format', 'json')
+        const argument = promptArgument(prompt, promptFile)
+        if (argument) args.push(argument)
+        return args
       })
     return route
   }
   route.buildArgs = override.buildArgs ?? ((model, prompt, promptFile) => {
-    const args = ['-p', promptText(prompt, promptFile)]
+    const args = []
+    const argument = promptArgument(prompt, promptFile)
+    if (argument) args.push(route.printFlag || '-p', argument)
+    else if (route.printFlag) args.push(route.printFlag)
     if (route.modelFlag && model) args.push('--model', model)
     return [...args, ...(route.extraArgs ?? [])]
   })
@@ -738,6 +783,18 @@ function loginMap(routes) {
   return map
 }
 
+/**
+ * The turns the ledger wrote before the plugin knew which calls are auxiliary.
+ * The harness named them in the error itself, so they can be told apart.
+ */
+function markOldAuxiliary(entry) {
+  if (entry?.auxiliary) return entry
+  if (typeof entry?.error === 'string' && entry.error.includes('SESSION_TITLE_TIMEOUT')) {
+    return { ...entry, auxiliary: true }
+  }
+  return entry
+}
+
 /** A tiny JSON ledger of the turns that went through the CLIs. */
 class UsageLedger {
   constructor(file, limit = 500) {
@@ -746,7 +803,7 @@ class UsageLedger {
     this.entries = []
     try {
       const raw = JSON.parse(readFileSync(file, 'utf8'))
-      if (Array.isArray(raw)) this.entries = raw.slice(-limit)
+      if (Array.isArray(raw)) this.entries = raw.slice(-limit).map(markOldAuxiliary)
     } catch {
       /* no ledger yet */
     }
@@ -764,8 +821,12 @@ class UsageLedger {
   }
 
   summary() {
-    const totals = { turns: 0, ok: 0, failed: 0, inputTokens: 0, outputTokens: 0, ms: 0 }
+    const totals = { turns: 0, ok: 0, failed: 0, auxiliary: 0, inputTokens: 0, outputTokens: 0, ms: 0 }
     for (const entry of this.entries) {
+      if (entry.auxiliary) {
+        totals.auxiliary += 1
+        continue
+      }
       totals.turns += 1
       if (entry.ok) totals.ok += 1
       else totals.failed += 1
@@ -866,6 +927,7 @@ class SignInManager {
   constructor(config) {
     this.config = config
     this.pending = new Map()
+    this.cache = new Map()
   }
 
   loginFor(provider) {
@@ -896,6 +958,10 @@ class SignInManager {
     if (this.hasStoredCredential(provider)) return { signedIn: true, text: 'credential found on this machine' }
     const route = this.config.providers?.[provider]
     if (!route || !executablePath(route.bin)) return { signedIn: false, text: 'CLI not installed' }
+    // The probe asks the CLI over the network, so its answer is kept for a
+    // while: the plugin page asks for every route at once.
+    const cached = this.cache.get(provider)
+    if (cached && Date.now() - cached.at < SIGN_IN_CACHE_MS) return cached.value
     const release = await CLI_LOCK.acquire(provider)
     let result
     try {
@@ -908,7 +974,9 @@ class SignInManager {
     }
     const { code, stdout, stderr } = result
     const text = `${stdout}\n${stderr}`
-    return { signedIn: code === 0 && login.signedIn(text), text: text.trim() }
+    const value = { signedIn: code === 0 && login.signedIn(text), text: text.trim() }
+    this.cache.set(provider, { at: Date.now(), value })
+    return value
   }
 
   /** Start the CLI's own sign-in and report what the human must confirm. */
@@ -1103,22 +1171,24 @@ class CliAdapter {
     const route = this.config.providers[provider]
     const limits = this.limitsFor(provider, id)
     const many = (route?.models?.length ?? 1) > 1
-    return {
+    const info = {
       provider,
       id,
       name: modelLabel(id, provider, route, many),
       context: { contextWindow: limits.contextWindow ?? DEFAULT_CONTEXT_WINDOW },
     }
+    return info
   }
-
   async prepareCall(provider, model, signal) {
     return {
-      model: this.modelId(provider, model),
+      // The host validates this value as the exact-model metadata, so the
+      // answer must be the model's own record and never the bare id.
+      model: await this.resolveModel(provider, model),
       stream: (options) => this.stream({ ...options, provider, signal }),
     }
   }
 
-  recordFailure(provider, model, startedAt, message) {
+  recordFailure(provider, model, startedAt, message, auxiliary = false) {
     this.ledger?.record({
       at: startedAt,
       ms: Date.now() - startedAt,
@@ -1128,6 +1198,7 @@ class CliAdapter {
       outputTokens: 0,
       ok: false,
       error: String(message).slice(0, 200),
+      ...(auxiliary ? { auxiliary: true } : {}),
     })
   }
 
@@ -1136,8 +1207,9 @@ class CliAdapter {
     const route = this.config.providers[provider]
     if (!route) throw new Error(`free-llm: unknown provider route "${provider}"`)
     const startedAt = Date.now()
+    const auxiliary = isAuxiliaryRequest(options)
     if (options.signal?.aborted) {
-      this.recordFailure(provider, options.model, startedAt, 'the request was aborted')
+      this.recordFailure(provider, options.model, startedAt, 'the request was aborted', auxiliary)
       yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
       return
     }
@@ -1155,41 +1227,40 @@ class CliAdapter {
 
   async *streamLocked(options, route, provider) {
     const startedAt = Date.now()
+    const auxiliary = isAuxiliaryRequest(options)
     try {
       await this.setup?.ensure(provider)
     } catch (error) {
-      this.recordFailure(provider, options.model, startedAt, error.message)
+      this.recordFailure(provider, options.model, startedAt, error.message, auxiliary)
       throw error
     }
     if (route.launchError) {
-      this.recordFailure(provider, options.model, startedAt, route.launchError)
+      this.recordFailure(provider, options.model, startedAt, route.launchError, auxiliary)
       throw new Error(route.launchError)
     }
 
     const offeredTools = Array.isArray(options.tools) ? options.tools : []
     const bridgeEnabled = offeredTools.length > 0
-    let promptDir
+    let promptFile
     let child
-    const removePromptDir = () => {
-      if (promptDir) {
-        try {
-          rmSync(promptDir, { recursive: true, force: true })
-        } catch {
-          /* best effort */
-        }
+    const removePromptFile = () => {
+      if (!promptFile) return
+      try {
+        rmSync(promptFile, { force: true })
+      } catch {
+        /* best effort */
       }
     }
     try {
-      let prompt = buildPrompt(options, this.config.includeSystemPrompt !== false) + (bridgeEnabled ? toolBridgePrompt(offeredTools) : '')
-      let promptFile
-      if (prompt.length > ARG_PROMPT_LIMIT || route.promptMode === 'file') {
-        if (route.promptMode === 'inline') {
-          prompt = prompt.slice(0, ARG_PROMPT_LIMIT)
-        } else {
-          promptDir = mkdtempSync(join(tmpdir(), 'dsh-free-llm-'))
-          promptFile = join(promptDir, 'prompt.txt')
-          writeFileSync(promptFile, prompt, { mode: 0o600 })
-        }
+      const transport = route.promptTransport ?? 'stdin'
+      let prompt = buildPrompt(options, this.config.includeSystemPrompt !== false) +
+        (bridgeEnabled ? toolBridgePrompt(offeredTools, { ownReadAllowed: transport === 'file' }) : '')
+      if (transport === 'file') {
+        // A CLI that only reads inside its own workspace needs the prompt in
+        // that workspace, not in the temp folder of the system.
+        promptFile = writePromptFile(this.config.cwd, prompt)
+      } else if (transport === 'inline' && prompt.length > ARG_PROMPT_LIMIT) {
+        prompt = prompt.slice(0, ARG_PROMPT_LIMIT)
       }
       options.signal?.throwIfAborted()
       const args = route.buildArgs(options.model, prompt, promptFile, { cwd: this.config.cwd })
@@ -1197,12 +1268,13 @@ class CliAdapter {
         cwd: this.config.cwd,
         windowsHide: true,
         env: process.env,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [transport === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       })
       child.stdin?.on('error', () => {})
+      if (transport === 'stdin') child.stdin?.end(prompt)
     } catch (error) {
-      removePromptDir()
-      this.recordFailure(provider, options.model, startedAt, error.message)
+      removePromptFile()
+      this.recordFailure(provider, options.model, startedAt, error.message, auxiliary)
       throw error
     }
 
@@ -1227,7 +1299,7 @@ class CliAdapter {
       clearTimeout(timer)
       options.signal?.removeEventListener('abort', onAbort)
       if (child.exitCode === null) child.kill()
-      removePromptDir()
+      removePromptFile()
     }
 
     let text = ''
@@ -1281,23 +1353,23 @@ class CliAdapter {
       const exit = await closed
       if (exit?.error) {
         const message = `free-llm: failed to start "${route.displayName}": ${exit.error.message}`
-        this.recordFailure(provider, options.model, startedAt, message)
+        this.recordFailure(provider, options.model, startedAt, message, auxiliary)
         throw new Error(message)
       }
       if (aborted) {
-        this.recordFailure(provider, options.model, startedAt, 'the request was aborted')
+        this.recordFailure(provider, options.model, startedAt, 'the request was aborted', auxiliary)
         yield { type: 'finish', reason: { kind: 'aborted', failure: { message: 'the request was aborted', code: 'ABORTED' } } }
         return
       }
       if (timedOut) {
         const message = `free-llm: "${route.displayName}" timed out after ${timeoutMs} ms`
-        this.recordFailure(provider, options.model, startedAt, message)
+        this.recordFailure(provider, options.model, startedAt, message, auxiliary)
         throw new Error(message)
       }
       if (cliError || (text.length > 0 && exit?.code !== 0)) {
         const detail = cliError || stderr.trim().slice(0, 500) || 'the CLI did not complete'
         const message = `free-llm: "${route.displayName}" failed (exit ${exit?.code ?? 'null'}): ${detail}`
-        this.recordFailure(provider, options.model, startedAt, message)
+        this.recordFailure(provider, options.model, startedAt, message, auxiliary)
         throw new Error(message)
       }
       if (text.length === 0 && finalText.length > 0) {
@@ -1311,10 +1383,11 @@ class CliAdapter {
         if (answer.length > 0) text = answer
       }
       if (text.length === 0) {
+        const detail = cliError || stderr.trim().slice(0, 500)
         const message = cliError
           ? `free-llm: "${route.displayName}" returned an error: ${cliError}`
-          : `free-llm: "${route.displayName}" produced no reply (exit ${exit?.code ?? 'null'})`
-        this.recordFailure(provider, options.model, startedAt, message)
+          : `free-llm: "${route.displayName}" produced no reply (exit ${exit?.code ?? 'null'})${detail ? `: ${detail}` : ''}`
+        this.recordFailure(provider, options.model, startedAt, message, auxiliary)
         throw new Error(message)
       }
       let calls = []
@@ -1322,7 +1395,7 @@ class CliAdapter {
         if (bridgeEnabled) calls = bridgeCalls(text, offeredTools)
       } catch (error) {
         const message = `free-llm: invalid DSH tool request: ${error.message}`
-        this.recordFailure(provider, options.model, startedAt, message)
+        this.recordFailure(provider, options.model, startedAt, message, auxiliary)
         throw new Error(message)
       }
       if (calls.length) {
@@ -1353,6 +1426,7 @@ class CliAdapter {
         cacheReadTokens: usage?.cacheReadTokens ?? 0,
         costUsd: cost,
         ok: true,
+        ...(auxiliary ? { auxiliary: true } : {}),
       })
       yield { type: 'finish', reason: { kind: calls.length ? 'tool-calls' : 'stop' } }
     } finally {
@@ -1413,8 +1487,7 @@ export function apply(ctx, config) {
   const normalized = {
     cwd: typeof raw.cwd === 'string' && raw.cwd.length > 0 ? raw.cwd : process.cwd(),
     providers,
-    includeSystemPrompt: raw.includeSystemPrompt !== false,
-    timeoutMs: Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0 ? raw.timeoutMs : DEFAULT_TIMEOUT_MS,
+    includeSystemPrompt: raw.includeSystemPrompt !== false,    timeoutMs: Number.isFinite(raw.timeoutMs) && raw.timeoutMs > 0 ? raw.timeoutMs : DEFAULT_TIMEOUT_MS,
     installTimeoutMs: Number.isFinite(raw.installTimeoutMs) && raw.installTimeoutMs > 0 ? raw.installTimeoutMs : 600000,
     cliInstallDir:
       typeof raw.cliInstallDir === 'string' && isAbsolute(raw.cliInstallDir)
@@ -1425,6 +1498,7 @@ export function apply(ctx, config) {
         ? raw.usageFile
         : profilePath('.dsh', 'free-llm-usage.json'),
   }
+  clearPromptFiles(normalized.cwd)
   const setup = new CliSetupManager(normalized)
   const manager = new SignInManager(normalized)
   const ledger = new UsageLedger(normalized.usageFile)
@@ -1462,37 +1536,43 @@ export function apply(ctx, config) {
         kind: 'exact',
         path: '/free-llm/status.json',
         handler: async (request, response) => {
-          const routes = []
-          for (const [id, route] of Object.entries(providers)) {
-            if (!mounted.includes(id)) {
-              routes.push({
+          // Every route asks its own CLI, so they go together: one slow probe
+          // must not hold the others behind it.
+          const routes = await Promise.all(
+            Object.entries(providers).map(async ([id, route]) => {
+              if (!mounted.includes(id)) {
+                return {
+                  id,
+                  name: route.displayName,
+                  family: route.family,
+                  notes: 'Esta ruta la sirve otro plugin del perfil, así que aquí no se monta.',
+                  providerLabel: route.providerLabel,
+                  accent: route.accent,
+                  installed: setup.status(id).installed,
+                  models: [],
+                  mounted: false,
+                  signedIn: null,
+                }
+              }
+              const wantsSignIn =
+                route.credentials?.length || CATALOG.find((entry) => entry.id === id)?.login
+              return {
                 id,
                 name: route.displayName,
                 family: route.family,
-                notes: 'Esta ruta la sirve otro plugin del perfil, así que aquí no se monta.',
+                notes: route.notes,
+                defaultModel: route.defaultModel,
                 providerLabel: route.providerLabel,
                 accent: route.accent,
                 installed: setup.status(id).installed,
-                models: [],
-                mounted: false,
-                signedIn: null,
-              })
-              continue
-            }
-            routes.push({
-              id,
-              name: route.displayName,
-              family: route.family,
-              notes: route.notes,
-              defaultModel: route.defaultModel,
-              providerLabel: route.providerLabel,
-              accent: route.accent,
-              installed: setup.status(id).installed,
-              models: await adapter.listModels(id),
-              mounted: true,
-              signedIn: route.credentials?.length || CATALOG.find((entry) => entry.id === id)?.login ? (await manager.status(id).catch(() => ({ signedIn: null }))).signedIn : null,
-            })
-          }
+                models: await adapter.listModels(id),
+                mounted: true,
+                signedIn: wantsSignIn
+                  ? (await manager.status(id).catch(() => ({ signedIn: null }))).signedIn
+                  : null,
+              }
+            }),
+          )
           response.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
           response.end(JSON.stringify({ routes, usage: ledger.summary() }))
         },

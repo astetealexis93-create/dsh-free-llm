@@ -33,6 +33,22 @@ function fakeCtx() {
   return ctx
 }
 
+/**
+ * The rules the host applies to the metadata an adapter returns: a provider,
+ * the exact model id, a name and a context window. A bare id fails them and
+ * takes the whole provider out of the selector.
+ */
+function hostAccepts(info, provider, model) {
+  if (!info || typeof info !== 'object') return false
+  if (typeof info.provider !== 'string' || info.provider !== provider) return false
+  if (typeof info.id !== 'string' || info.id !== model) return false
+  if (typeof info.name !== 'string' || info.name.length === 0) return false
+  if (info.description !== undefined && typeof info.description !== 'string') return false
+  const context = info.context
+  if (context !== undefined && (!Number.isInteger(context.contextWindow) || context.contextWindow <= 0)) return false
+  return true
+}
+
 const ctx = fakeCtx()
 apply(ctx, {})
 
@@ -85,18 +101,18 @@ for (const { name: route, adapter } of routes) {
   console.log(`${route}: catalog contract -> ${catalogOk ? 'ok' : 'BAD'}`)
 
   // The exact-model metadata: the host rejects a bare id here and drops the
-  // whole provider out of the selector.
-  const info = await adapter.resolveModel(route, models[0]?.id)
-  const infoOk =
-    Boolean(info) &&
-    info.provider === route &&
-    info.id === models[0]?.id &&
-    typeof info.name === 'string' &&
-    info.name.length > 0 &&
-    Number.isInteger(info.context?.contextWindow) &&
-    info.context.contextWindow > 0
-  results.push({ route, resolve: infoOk ? 'ok' : 'bad', ok: infoOk })
-  console.log(`${route}: resolveModel -> ${JSON.stringify(info)}`)
+  // whole provider out of the selector. Every model of the route has to pass,
+  // not only the first one.
+  let resolveOk = models.length > 0
+  for (const model of models) {
+    const info = await adapter.resolveModel(route, model.id)
+    if (!hostAccepts(info, route, model.id)) {
+      resolveOk = false
+      console.log(`${route}: resolveModel(${model.id}) -> ${JSON.stringify(info)}`)
+    }
+  }
+  results.push({ route, resolve: resolveOk ? 'ok' : 'bad', ok: resolveOk })
+  console.log(`${route}: resolveModel (${models.length} models) -> ${resolveOk ? 'ok' : 'BAD'}`)
 
   // The selector waits for this answer, so it has to come back at once even
   // when the CLI behind it is slow.
@@ -109,15 +125,27 @@ for (const { name: route, adapter } of routes) {
   console.log(`${route}: cold catalog -> ${listMs} ms ${fastOk ? 'ok' : 'TOO SLOW'}`)
 
   const call = await adapter.prepareCall(route, models[0]?.id, undefined)
+  // The same check the host runs on the metadata that comes back here: a bare
+  // id fails it and the turn dies with INVALID_MODEL_INFO.
+  const callOk = hostAccepts(call?.model, route, models[0]?.id)
+  results.push({ route, prepareCall: callOk ? 'ok' : 'bad', ok: callOk })
+  console.log(`${route}: prepareCall model -> ${callOk ? 'ok' : 'BAD'} ${JSON.stringify(call?.model)}`)
   const events = []
-  for await (const event of call.stream({
-    provider: route,
-    model: call.model,
-    messages: [{ role: 'user', content: 'responde solo: OK' }],
-    tools: [],
-  })) {
-    events.push(event)
-    if (event.type === 'text-delta') events.text = (events.text ?? '') + event.text
+  try {
+    for await (const event of call.stream({
+      provider: route,
+      // The host sends the exact model id here, not the metadata object.
+      model: models[0]?.id,
+      messages: [{ role: 'user', content: 'responde solo: OK' }],
+      tools: [],
+    })) {
+      events.push(event)
+      if (event.type === 'text-delta') events.text = (events.text ?? '') + event.text
+    }
+  } catch (error) {
+    results.push({ route, turn: error.message, ok: false })
+    console.log(`${route}: turn -> ERROR ${error.message}`)
+    continue
   }
   const answer = (events.text ?? '').trim()
   const finished = events.find((event) => event.type === 'finish')
@@ -131,24 +159,30 @@ for (const { name: route, adapter } of routes) {
   // for one of its own.
   const bridgeCall = await adapter.prepareCall(route, models[0]?.id, undefined)
   const bridgeEvents = []
-  for await (const event of bridgeCall.stream({
-    provider: route,
-    model: bridgeCall.model,
-    messages: [
-      {
-        role: 'user',
-        content: 'Usa la herramienta read_file para leer README.md. No lo hagas tú con tus propias herramientas.',
-      },
-    ],
-    tools: [
-      {
-        name: 'read_file',
-        description: 'Read a file from disk.',
-        parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
-      },
-    ],
-  })) {
-    bridgeEvents.push(event)
+  try {
+    for await (const event of bridgeCall.stream({
+      provider: route,
+      model: models[0]?.id,
+      messages: [
+        {
+          role: 'user',
+          content: 'Usa la herramienta read_file para leer README.md. No lo hagas tú con tus propias herramientas.',
+        },
+      ],
+      tools: [
+        {
+          name: 'read_file',
+          description: 'Read a file from disk.',
+          parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+        },
+      ],
+    })) {
+      bridgeEvents.push(event)
+    }
+  } catch (error) {
+    results.push({ route, bridge: error.message, ok: false })
+    console.log(`${route}: bridge -> ERROR ${error.message}`)
+    continue
   }
   const toolCall = bridgeEvents.find((event) => event.type === 'tool-call-delta')
   const bridgeFinish = bridgeEvents.find((event) => event.type === 'finish')
